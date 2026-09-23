@@ -1,7 +1,8 @@
 """
 Runnable, dependency-light (NumPy only) verification of every closed-form
 formula used by the diffusion/VAE code, so correctness of the core math is
-checked BEFORE it's used inside PyTorch training.
+checked BEFORE it's used inside PyTorch training (in case PyTorch is not 
+available in this environment).
 Run: python verify/verify_math.py
 """
 import sys, os
@@ -10,7 +11,7 @@ import numpy as np
 from diffusion_utils import (
     linear_beta_schedule, cosine_beta_schedule, compute_alphas,
     q_sample, predict_z0_from_noise, kl_diag_gaussian_to_standard_normal,
-    sinusoidal_time_embedding, ddpm_reverse_step_mean_var,
+    sinusoidal_time_embedding, ddpm_reverse_step_mean_var, ddim_step,
 )
 
 PASS = []
@@ -209,6 +210,66 @@ def test_ddim_z0_amplification_requires_clipping():
           f"clipped t=999 err={err_t999_clipped:.3f}")
 
 
+def test_ddim_eta1_matches_ancestral():
+    """Known identity (Song et al. 2020, DDIM paper, Sec 4.1): with eta=1
+    and consecutive (non-skipped) timesteps, generalized DDIM is
+    mathematically identical to DDPM ancestral sampling -- both the mean
+    AND the variance. This is what justifies adding an `eta` parameter to
+    sample_ddim as a genuine speed/robustness dial rather than an
+    unrelated new mechanism: eta=0 is fast+fragile-under-guidance,
+    eta=1 recovers ancestral's robustness."""
+    print("\n== DDIM(eta=1, consecutive steps) == DDPM ancestral (known identity) ==")
+    rng = np.random.default_rng(9)
+    T = 300
+    betas = linear_beta_schedule(T)
+    alphas, alpha_bars = compute_alphas(betas)
+
+    D, N = 5, 200
+    z_t = rng.normal(0, 1, size=(N, D))
+    eps_pred = rng.normal(0, 1, size=(N, D))
+    t = rng.integers(1, T, size=N)
+
+    # DDPM ancestral reverse step (already-verified formula)
+    ddpm_mean, ddpm_var = ddpm_reverse_step_mean_var(z_t, t, eps_pred, betas, alphas, alpha_bars)
+
+    # generalized DDIM step with eta=1, t_prev = t-1 (no skipping), per-sample
+    # DDPM ancestral TRUE posterior variance beta_tilde_t = (1-abar_{t-1})/(1-abar_t)*beta_t
+    # -- NOT the "simple" var=beta_t choice returned by ddpm_reverse_step_mean_var
+    # (that's a different, also-valid, upper-bound choice from Ho et al. 2020
+    # Sec 3.2; the eta=1 DDIM identity specifically matches the TRUE posterior
+    # variance, not the simple upper bound -- see Song et al. 2020 Sec 4.1).
+    alpha_bars_prev_arr = np.concatenate([[1.0], alpha_bars[:-1]])
+    beta_tilde = (1 - alpha_bars_prev_arr[t]) / (1 - alpha_bars[t]) * betas[t]
+
+    ddim_means = np.zeros_like(z_t)
+    ddim_sigmas = np.zeros(N)
+    for i in range(N):
+        m, s, _ = ddim_step(z_t[i], t[i], t[i] - 1, eps_pred[i], alpha_bars, eta=1.0)
+        ddim_means[i] = m
+        ddim_sigmas[i] = s
+
+    check("eta=1 DDIM mean matches DDPM ancestral mean",
+          np.allclose(ddim_means, ddpm_mean, atol=1e-5),
+          f"max abs diff={np.max(np.abs(ddim_means - ddpm_mean)):.2e}")
+    check("eta=1 DDIM variance (sigma^2) matches the TRUE DDPM posterior "
+          "variance beta_tilde_t (not the simple beta_t upper bound)",
+          np.allclose(ddim_sigmas ** 2, beta_tilde, atol=1e-8),
+          f"max abs diff={np.max(np.abs(ddim_sigmas**2 - beta_tilde)):.2e}")
+    check("sanity: the simple beta_t choice really is an upper bound on beta_tilde_t "
+          "(confirms these are legitimately two different quantities, not a bug)",
+          np.all(ddpm_var >= beta_tilde - 1e-10))
+
+    # eta=0 must always be perfectly deterministic (sigma == 0)
+    m0, s0, _ = ddim_step(z_t[0], t[0], t[0] - 1, eps_pred[0], alpha_bars, eta=0.0)
+    check("eta=0 gives exactly zero stochasticity (sigma=0)", s0 == 0.0, f"got sigma={s0}")
+
+    # sigma should scale ~linearly with eta in between (sanity, not a deep identity)
+    _, s_half, _ = ddim_step(z_t[0], t[0], t[0] - 1, eps_pred[0], alpha_bars, eta=0.5)
+    check("sigma(eta=0.5) ~= 0.5 * sigma(eta=1.0) (linear in eta, per the formula)",
+          np.isclose(s_half, 0.5 * ddim_sigmas[0], atol=1e-6),
+          f"s_half={s_half:.4f}, 0.5*s1={0.5*ddim_sigmas[0]:.4f}")
+
+
 def test_time_embedding():
     print("\n== sinusoidal time embedding ==")
     emb = sinusoidal_time_embedding(np.array([0, 1, 10, 100]), dim=16)
@@ -229,6 +290,7 @@ if __name__ == '__main__':
     test_predict_z0_inversion()
     test_reverse_step_matches_true_posterior()
     test_ddim_z0_amplification_requires_clipping()
+    test_ddim_eta1_matches_ancestral()
     test_kl_divergence()
     test_time_embedding()
 
