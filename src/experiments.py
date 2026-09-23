@@ -10,7 +10,6 @@ Usage:
 
 All results are written to ../results/*.csv and ../results/*.npz (raw
 arrays for figures); run visualize.py afterwards to produce ../figures/*.png
-and generate_report.py to populate ../REPORT.md with the real numbers.
 """
 import sys, os, time, argparse
 sys.path.insert(0, os.path.dirname(__file__))
@@ -100,39 +99,48 @@ def experiment_2_conditional_generation(vae, diffusion, classifier, class_names,
 
 
 def experiment_3_ddim_steps(vae, diffusion, classifier, device, latent_dim,
-                             step_counts, n_samples=64, fixed_class=0, guidance_scale=3.0):
+                             step_counts, n_samples=64, fixed_class=0, guidance_scale=3.0,
+                             eta=0.0):
     rows = []
     for n_steps in step_counts:
         y = torch.full((n_samples,), fixed_class, dtype=torch.long, device=device)
         t0 = time.time()
         z_gen = diffusion.sample_ddim(n_samples, y, guidance_scale=guidance_scale,
-                                       latent_dim=latent_dim, n_steps=n_steps)
+                                       latent_dim=latent_dim, n_steps=n_steps, eta=eta)
         elapsed = time.time() - t0
         with torch.no_grad():
             imgs = vae.decoder(z_gen)
         fidelity = classification_fidelity(classifier, imgs, y, device)
-        rows.append(dict(n_steps=n_steps, wall_time_s=elapsed, fidelity=fidelity))
-        print(f"  [exp3] n_steps={n_steps:4d}  time={elapsed:.3f}s  fidelity={fidelity:.3f}")
+        rows.append(dict(n_steps=n_steps, eta=eta, wall_time_s=elapsed, fidelity=fidelity))
+        print(f"  [exp3] n_steps={n_steps:4d}  eta={eta:.2f}  time={elapsed:.3f}s  fidelity={fidelity:.3f}")
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(RESULTS_DIR, 'exp3_ddim_steps.csv'), index=False)
     return df
 
 
 def experiment_4_guidance_scale(vae, diffusion, classifier, device, latent_dim,
-                                 guidance_scales, n_per_class=32, n_steps=50, n_classes_eval=10):
+                                 guidance_scales, n_per_class=32, n_steps=50, n_classes_eval=10,
+                                 eta=0.0):
+    """NOTE: eta=0.0 (fully deterministic DDIM) is fast but was found to be
+    fragile under strong classifier-free guidance -- see diagnose_ddim.py
+    and REPORT.md's debugging notes. If Experiment 4's fidelity curve looks
+    non-monotonic or surprisingly low, re-run with --ddim_eta 0.3-1.0 (a
+    small amount of stochasticity, per Song et al. 2020's DDIM formula) and
+    compare; this trade-off (speed vs. guidance-robustness) is itself a
+    legitimate, reportable finding."""
     rows = []
     for w in guidance_scales:
         fids, divs = [], []
         for c in range(n_classes_eval):
             y = torch.full((n_per_class,), c, dtype=torch.long, device=device)
             z_gen = diffusion.sample_ddim(n_per_class, y, guidance_scale=w,
-                                           latent_dim=latent_dim, n_steps=n_steps)
+                                           latent_dim=latent_dim, n_steps=n_steps, eta=eta)
             with torch.no_grad():
                 imgs = vae.decoder(z_gen)
             fids.append(classification_fidelity(classifier, imgs, y, device))
             divs.append(pairwise_diversity(imgs.cpu().numpy()))
-        rows.append(dict(guidance_scale=w, mean_fidelity=np.mean(fids), mean_diversity=np.mean(divs)))
-        print(f"  [exp4] w={w:5.1f}  mean_fidelity={np.mean(fids):.3f}  mean_diversity={np.mean(divs):.2f}")
+        rows.append(dict(guidance_scale=w, eta=eta, mean_fidelity=np.mean(fids), mean_diversity=np.mean(divs)))
+        print(f"  [exp4] w={w:5.1f}  eta={eta:.2f}  mean_fidelity={np.mean(fids):.3f}  mean_diversity={np.mean(divs):.2f}")
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(RESULTS_DIR, 'exp4_guidance_scale.csv'), index=False)
     return df
@@ -150,6 +158,9 @@ def main():
     p.add_argument('--latent_dims', type=int, nargs='+', default=[2, 4, 8, 16, 32, 64])
     p.add_argument('--ddim_steps', type=int, nargs='+', default=[5, 10, 20, 50, 100, 250])
     p.add_argument('--guidance_scales', type=float, nargs='+', default=[0.0, 1.0, 2.0, 4.0, 7.0, 10.0])
+    p.add_argument('--ddim_eta', type=float, default=0.0,
+                    help='DDIM stochasticity (0=fast/deterministic, 1=ancestral-like robustness '
+                         'under guidance; see diagnose_ddim.py). Applied to Experiments 3 and 4.')
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -186,11 +197,11 @@ def main():
 
     print("\n=== Experiment 3: DDIM sampling-steps ablation ===")
     experiment_3_ddim_steps(vae, diffusion, classifier, device, args.main_latent_dim,
-                             args.ddim_steps)
+                             args.ddim_steps, eta=args.ddim_eta)
 
     print("\n=== Experiment 4: classifier-free-guidance-scale ablation ===")
     experiment_4_guidance_scale(vae, diffusion, classifier, device, args.main_latent_dim,
-                                 args.guidance_scales)
+                                 args.guidance_scales, eta=args.ddim_eta)
 
     torch.save(vae.state_dict(), os.path.join(RESULTS_DIR, f'vae_d{args.main_latent_dim}.pt'))
     torch.save(diffusion.denoiser.state_dict(), os.path.join(RESULTS_DIR, 'denoiser.pt'))

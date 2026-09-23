@@ -98,6 +98,32 @@ def ddpm_reverse_step_mean_var(z_t, t, eps_pred, betas, alphas, alpha_bars):
     return mean, var
 
 
+def ddim_step(z_t, t, t_prev, eps_pred, alpha_bars, eta):
+    """One generalized DDIM update step (Song et al. 2020, eq. 12), with
+    stochasticity level `eta` (eta=0: fully deterministic DDIM; eta=1,
+    with t_prev==t-1, is mathematically identical to DDPM ancestral
+    sampling -- verified below in test_ddim_eta1_matches_ancestral).
+
+    t_prev < 0 is treated as the terminal step (alpha_bar_prev = 1, i.e.
+    z0 itself). Returns (mean, sigma, z0_pred) -- caller adds
+    `sigma * noise` for the stochastic part (skip it, or pass eta=0, for
+    a deterministic step).
+    """
+    alpha_bar_t = alpha_bars[t]
+    alpha_bar_prev = 1.0 if t_prev < 0 else alpha_bars[t_prev]
+
+    z0_pred = (z_t - np.sqrt(1 - alpha_bar_t) * eps_pred) / np.sqrt(alpha_bar_t)
+
+    if eta == 0.0 or t_prev < 0:
+        sigma = 0.0
+    else:
+        sigma = eta * np.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar_t) *
+                               (1 - alpha_bar_t / alpha_bar_prev))
+    dir_coef = np.sqrt(max(1 - alpha_bar_prev - sigma ** 2, 0.0))
+    mean = np.sqrt(alpha_bar_prev) * z0_pred + dir_coef * eps_pred
+    return mean, sigma, z0_pred
+
+
 def kl_diag_gaussian_to_standard_normal(mu, logvar):
     """Closed-form KL( N(mu, diag(exp(logvar))) || N(0, I) ), summed over
     the latent dimension, per-sample. Standard VAE regularizer.

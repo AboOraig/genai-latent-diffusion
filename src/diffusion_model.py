@@ -1,8 +1,8 @@
 """
 Conditional diffusion model operating in the VAE's latent space (not pixel
-space -- this is what makes it a *latent* diffusion model: much cheaper to 
-train than pixel-space diffusion since the latent
-dimensionality is small, e.g. 2-64, vs. 784 raw pixels).
+space -- this is what makes it a *latent* diffusion model: much cheaper to
+train than pixel-space diffusion since the latent dimensionality is small, 
+e.g. 2-64, vs. 784 raw pixels).
 
 All noise-schedule / forward-process / reverse-step formulas here are the
 EXACT formulas verified (with NumPy) in verify/verify_math.py -- see the
@@ -179,10 +179,19 @@ class LatentDiffusion:
         return z
 
     @torch.no_grad()
-    def sample_ddim(self, n_samples, y, guidance_scale=1.0, latent_dim=None, n_steps=50):
-        """Faster deterministic(-ish) DDIM sampling, subsampling the T-step
-        schedule down to n_steps -- used for the speed/quality ablation
-        (Experiment 3)."""
+    def sample_ddim(self, n_samples, y, guidance_scale=1.0, latent_dim=None, n_steps=50, eta=0.0):
+        """Generalized DDIM sampling (Song et al. 2020, eq. 12), subsampling
+        the T-step schedule down to n_steps. `eta` controls stochasticity:
+        eta=0 is the fast, fully deterministic DDIM update (can be fragile
+        under strong classifier-free guidance -- see diagnose_ddim.py);
+        eta=1 with n_steps==T recovers ancestral DDPM's robustness (this
+        exact identity is verified numerically in
+        verify/verify_math.py::test_ddim_eta1_matches_ancestral). Values in
+        between trade sampling speed for guidance robustness -- this is the
+        dial Experiment 3 sweeps in addition to n_steps.
+
+        Formula matches diffusion_utils.ddim_step exactly (verified
+        separately with NumPy); only the tensor library differs."""
         latent_dim = latent_dim or self.denoiser.out_proj.out_features
         z = torch.randn(n_samples, latent_dim, device=self.device)
         y_null = torch.full_like(y, self.null_token)
@@ -204,12 +213,21 @@ class LatentDiffusion:
             if self.latent_min is not None:
                 z0_pred = torch.clamp(z0_pred, self.latent_min, self.latent_max)
 
-            if i + 1 < len(step_indices):
+            is_terminal = (i + 1 >= len(step_indices))
+            if is_terminal:
+                alpha_bar_prev = torch.tensor(1.0, device=self.device)
+                sigma = torch.tensor(0.0, device=self.device)
+            else:
                 t_prev = step_indices[i + 1].item()
                 alpha_bar_prev = self.alpha_bars[t_prev]
-            else:
-                alpha_bar_prev = torch.tensor(1.0, device=self.device)
+                if eta == 0.0:
+                    sigma = torch.tensor(0.0, device=self.device)
+                else:
+                    sigma = eta * torch.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar_t) *
+                                              (1 - alpha_bar_t / alpha_bar_prev))
 
-            # DDIM deterministic update (eta=0)
-            z = torch.sqrt(alpha_bar_prev) * z0_pred + torch.sqrt(1 - alpha_bar_prev) * eps
+            dir_coef = torch.sqrt(torch.clamp(1 - alpha_bar_prev - sigma ** 2, min=0.0))
+            z = torch.sqrt(alpha_bar_prev) * z0_pred + dir_coef * eps
+            if not is_terminal and eta > 0.0:
+                z = z + sigma * torch.randn_like(z)
         return z
