@@ -15,7 +15,6 @@ pip install -r requirements.txt
 cd src
 python experiments.py --dataset mnist
 python visualize.py
-python generate_report.py
 ```
 
 Rough runtime on a free Colab GPU: VAE training (6 latent dims × 15
@@ -36,12 +35,11 @@ src/
   train_utils.py            VAE / diffusion training loops
   experiments.py            the four computational studies (run this)
   visualize.py               all figures (run after experiments.py; tested with dummy data)
-  generate_report.py         fills REPORT.md with actual results (run last)
 verify/
   verify_math.py             NumPy-only correctness checks for the diffusion/VAE math
 results/                    CSVs + raw arrays written by experiments.py
 figures/                     PNGs written by visualize.py
-REPORT.md                    placeholder until run the pipeline
+REPORT.md                    results report
 ```
 
 ## What's implemented
