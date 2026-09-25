@@ -10,6 +10,7 @@ Usage:
 
 All results are written to ../results/*.csv and ../results/*.npz (raw
 arrays for figures); run visualize.py afterwards to produce ../figures/*.png
+and generate_report.py to populate ../REPORT.md with the real numbers.
 """
 import sys, os, time, argparse
 sys.path.insert(0, os.path.dirname(__file__))
@@ -146,6 +147,43 @@ def experiment_4_guidance_scale(vae, diffusion, classifier, device, latent_dim,
     return df
 
 
+def experiment_4b_eta_sweep(vae, diffusion, classifier, device, latent_dim,
+                             eta_values, guidance_scales, n_steps=250,
+                             n_per_class=32, n_classes_eval=10):
+    """Controlled ablation: sweeps eta AND guidance_scale on the SAME
+    trained checkpoint (this run's vae/diffusion/classifier objects,
+    reused as-is -- no retraining between points).
+
+    This exists because comparing separate `python experiments.py
+    --ddim_eta 0.5` vs `--ddim_eta 1.0` invocations is CONFOUNDED: each
+    invocation retrains the VAE, diffusion model, and classifier from
+    scratch with no fixed random seed, so any difference in the resulting
+    Experiment 3/4 numbers mixes together the effect of eta with ordinary
+    training-run-to-run variance (this was flagged explicitly after
+    comparing two such runs -- see REPORT.md's debugging notes). Here eta
+    is the ONLY thing that changes between rows, so any pattern in the
+    output is attributable to eta alone."""
+    rows = []
+    for eta in eta_values:
+        for w in guidance_scales:
+            fids, divs = [], []
+            for c in range(n_classes_eval):
+                y = torch.full((n_per_class,), c, dtype=torch.long, device=device)
+                z_gen = diffusion.sample_ddim(n_per_class, y, guidance_scale=w,
+                                               latent_dim=latent_dim, n_steps=n_steps, eta=eta)
+                with torch.no_grad():
+                    imgs = vae.decoder(z_gen)
+                fids.append(classification_fidelity(classifier, imgs, y, device))
+                divs.append(pairwise_diversity(imgs.cpu().numpy()))
+            rows.append(dict(eta=eta, guidance_scale=w,
+                              mean_fidelity=np.mean(fids), mean_diversity=np.mean(divs)))
+            print(f"  [exp4b] eta={eta:.2f}  w={w:5.1f}  "
+                  f"mean_fidelity={np.mean(fids):.3f}  mean_diversity={np.mean(divs):.2f}")
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(RESULTS_DIR, 'exp4b_eta_sweep.csv'), index=False)
+    return df
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--dataset', default='mnist', choices=['mnist', 'fashion_mnist'])
@@ -161,6 +199,10 @@ def main():
     p.add_argument('--ddim_eta', type=float, default=0.0,
                     help='DDIM stochasticity (0=fast/deterministic, 1=ancestral-like robustness '
                          'under guidance; see diagnose_ddim.py). Applied to Experiments 3 and 4.')
+    p.add_argument('--eta_sweep_values', type=float, nargs='+', default=[0.0, 0.25, 0.5, 0.75, 1.0],
+                    help='eta values for the CONTROLLED Experiment 4b (single checkpoint, no confound).')
+    p.add_argument('--eta_sweep_guidance_scales', type=float, nargs='+', default=[1.0, 4.0, 7.0, 10.0],
+                    help='guidance scales to cross with eta_sweep_values in Experiment 4b.')
     args = p.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -202,6 +244,10 @@ def main():
     print("\n=== Experiment 4: classifier-free-guidance-scale ablation ===")
     experiment_4_guidance_scale(vae, diffusion, classifier, device, args.main_latent_dim,
                                  args.guidance_scales, eta=args.ddim_eta)
+
+    print("\n=== Experiment 4b: controlled eta ablation (single checkpoint, no confound) ===")
+    experiment_4b_eta_sweep(vae, diffusion, classifier, device, args.main_latent_dim,
+                             args.eta_sweep_values, args.eta_sweep_guidance_scales)
 
     torch.save(vae.state_dict(), os.path.join(RESULTS_DIR, f'vae_d{args.main_latent_dim}.pt'))
     torch.save(diffusion.denoiser.state_dict(), os.path.join(RESULTS_DIR, 'denoiser.pt'))

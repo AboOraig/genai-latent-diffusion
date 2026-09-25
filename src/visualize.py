@@ -171,10 +171,39 @@ def fig_diffusion_training_curve():
     plt.close(fig)
 
 
+def fig_eta_sweep():
+    path = os.path.join(RESULTS_DIR, 'exp4b_eta_sweep.csv')
+    if not os.path.exists(path):
+        return
+    df = pd.read_csv(path)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    ws = sorted(df.guidance_scale.unique())
+    colors = plt.cm.viridis(np.linspace(0, 0.85, len(ws)))
+
+    for w, color in zip(ws, colors):
+        sub = df[df.guidance_scale == w].sort_values('eta')
+        axes[0].plot(sub.eta, sub.mean_fidelity, marker='o', color=color, label=f'w={w:g}')
+        axes[1].plot(sub.eta, sub.mean_diversity, marker='o', color=color, label=f'w={w:g}')
+
+    axes[0].set_xlabel('DDIM eta (stochasticity)'); axes[0].set_ylabel('Mean fidelity')
+    axes[0].set_title('Fidelity vs. eta, by guidance scale')
+    axes[0].legend(fontsize=8, title='guidance w')
+
+    axes[1].set_xlabel('DDIM eta (stochasticity)'); axes[1].set_ylabel('Mean within-class diversity')
+    axes[1].set_title('Diversity vs. eta, by guidance scale')
+    axes[1].legend(fontsize=8, title='guidance w')
+
+    fig.suptitle('Experiment 4b — Controlled eta ablation (single checkpoint, no confound)', y=1.04)
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, 'exp4b_eta_sweep.png'), bbox_inches='tight')
+    plt.close(fig)
+
+
 if __name__ == '__main__':
     fig_latent_dim_study()
     fig_conditional_generation()
     fig_ddim_steps()
     fig_guidance_scale()
+    fig_eta_sweep()
     fig_diffusion_training_curve()
     print("All figures written to", FIG_DIR)
