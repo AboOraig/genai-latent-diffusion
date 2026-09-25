@@ -117,7 +117,7 @@ figures/                     PNGs written by visualize.py
 REPORT.md                    full write-up: formulation, methodology, results, debugging notes
 ```
 
-## What's implemented, mapped to the CV bullets
+## What's implemented
 
 1. **VAE with compact latent representations** (`vae.py`) — convolutional
    encoder/decoder, closed-form KL regularizer (verified formula).
